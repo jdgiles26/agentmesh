@@ -1,22 +1,24 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import type { Artifact, PipelineRun, StageId, PipelineStatus } from '../types/artifact';
+import type { Artifact, PipelineRun, StageId, PipelineStatus, VirtualFile } from '../types/artifact';
 import { STAGES } from '../types/stages';
 
 interface BlackboardState {
   run: PipelineRun | null;
   selectedArtifactId: string | null;
   selectedStageId: StageId | null;
+  selectedFilePath: string | null;
 
-  // Actions
   startRun: (requirement: string) => void;
   setStageStatus: (stage: StageId, status: string, duration_ms?: number) => void;
   addArtifact: (artifact: Artifact) => void;
   updateArtifact: (id: string, updates: Partial<Artifact>) => void;
   setCurrentStage: (stage: StageId | null) => void;
   setPipelineStatus: (status: PipelineStatus) => void;
+  setWorkspace: (files: VirtualFile[]) => void;
   selectArtifact: (id: string | null) => void;
   selectStage: (id: StageId | null) => void;
+  selectFile: (path: string | null) => void;
   addError: (error: string) => void;
   reset: () => void;
 }
@@ -31,18 +33,20 @@ const createEmptyRun = (requirement: string): PipelineRun => ({
   artifacts: {},
   stage_history: [],
   errors: [],
+  workspace: [],
 });
 
 export const useBlackboard = create<BlackboardState>((set, get) => ({
   run: null,
   selectedArtifactId: null,
   selectedStageId: null,
+  selectedFilePath: null,
 
   startRun: (requirement: string) => {
     const run = createEmptyRun(requirement);
     run.status = 'running';
     run.started_at = new Date().toISOString();
-    set({ run, selectedArtifactId: null, selectedStageId: null });
+    set({ run, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null });
   },
 
   setStageStatus: (stage, status, duration_ms) => {
@@ -99,8 +103,15 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     set({ run: { ...run, ...updates } });
   },
 
+  setWorkspace: (files) => {
+    const { run } = get();
+    if (!run) return;
+    set({ run: { ...run, workspace: files } });
+  },
+
   selectArtifact: (id) => set({ selectedArtifactId: id }),
   selectStage: (id) => set({ selectedStageId: id }),
+  selectFile: (path) => set({ selectedFilePath: path }),
 
   addError: (error) => {
     const { run } = get();
@@ -108,7 +119,13 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     set({ run: { ...run, errors: [...run.errors, error] } });
   },
 
-  reset: () => set({ run: null, selectedArtifactId: null, selectedStageId: null }),
+  reset: () =>
+    set({
+      run: null,
+      selectedArtifactId: null,
+      selectedStageId: null,
+      selectedFilePath: null,
+    }),
 }));
 
 export function createArtifact(

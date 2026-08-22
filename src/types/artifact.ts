@@ -62,6 +62,28 @@ export interface PipelineRun {
   completed_at: string | null;
   requirement: string;
   artifacts: Record<string, Artifact>;
-  stage_history: { stage: StageId; status: string; duration_ms?: number }[];
+  stage_history: { stage: StageId; status: string; duration_ms?: number; message?: string }[];
   errors: string[];
+  workspace: VirtualFile[];
+}
+
+export interface VirtualFile {
+  path: string;
+  content: string;
+  language: string;
+}
+
+export interface TestResult {
+  name: string;
+  passed: boolean;
+  error?: string;
+  duration_ms: number;
+}
+
+export interface ExecutionReport {
+  exit_code: number;
+  tests: TestResult[];
+  stdout: string[];
+  stderr: string[];
+  duration_ms: number;
 }

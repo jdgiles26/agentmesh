@@ -12,14 +12,14 @@ export function BlackboardPanel() {
   );
 
   return (
-    <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 h-full flex flex-col">
+    <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 h-full flex flex-col min-h-[280px]">
       <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
         <FileJson className="w-4 h-4" />
         Blackboard ({artifacts.length} artifacts)
       </h2>
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
         {artifacts.length === 0 && (
-          <p className="text-xs text-slate-500">Artifacts will appear here as stages complete.</p>
+          <p className="text-xs text-slate-500">Artifacts appear as stages complete.</p>
         )}
         {artifacts.map((art) => (
           <button

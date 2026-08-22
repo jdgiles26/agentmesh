@@ -2,33 +2,26 @@
 
 **Browser-Native Cooperative Multi-Agent AI Software Engineering Pipeline**
 
-AgentMesh-X transforms a natural-language software requirement into a tested, reviewed, security-checked, documented, and releasable software artifact through a sequence of independently instantiated AI agents.
+Real working implementation of the AgentMesh-X specification.
 
-It expands the classic Planner → Coder → Debugger → Reviewer pattern into a full engineering lifecycle with explicit requirements, architecture, threat modeling, testing, verification, adversarial review, observability, and release stages.
+## What actually works
 
-> The system behaves like an engineering organization rather than a single conversational coding assistant.
-> An AI-generated answer is never assumed correct merely because another AI generated it.
+| Capability | Status |
+|---|---|
+| 22-stage pipeline with quality gates | ✅ |
+| Artifact blackboard (structured, versioned) | ✅ |
+| Independent stage isolation (no shared chat history) | ✅ |
+| Deterministic code generation (domain templates) | ✅ |
+| Virtual workspace + file browser | ✅ |
+| **In-browser unit test execution** | ✅ |
+| Static analysis (basic) | ✅ |
+| Security scan of generated code | ✅ |
+| Regression re-run of tests | ✅ |
+| Final review based on evidence only | ✅ |
+| Download generated project as ZIP | ✅ |
+| LLM / WebGPU local inference | 🔜 Pluggable (not bundled) |
 
-## Core Principles
-
-- **Independent Agent Principle**: Every stage uses a fresh, isolated model invocation. Agents receive only approved artifacts — never hidden reasoning, conversation history, or system prompts from previous agents.
-- **Artifact is the Contract**: Communication happens exclusively through structured, versioned artifacts on a shared blackboard.
-- **Evidence over Consensus**: Claims must be backed by tests, static analysis, sandbox results, or deterministic tools.
-- **Local-First Preference**: Inference prefers Browser → WebGPU → Transformers.js → Local Model. Source code and secrets stay in the browser unless remote inference is explicitly authorized.
-- **Bounded Everything**: Retries, context, and scope are strictly limited. No infinite repair loops.
-
-## Architecture Overview
-
-```
-Request → Requirements → Validation → Acceptance Criteria → Architecture
-    → Threat Model → Test Strategy → Task DAG
-    → (per task: Tests → Code → Static Analysis → Sandbox → Debug → Regression)
-    → Integration → Security → Performance → Accessibility
-    → Adversarial Review → Independent Review → Traceability
-    → Documentation → Release Candidate → (Human Gate) → Canary → Release
-```
-
-## Getting Started
+## Quick start
 
 ```bash
 npm install
@@ -37,37 +30,42 @@ npm run dev
 
 Open http://localhost:5173
 
-## Tech Stack
+Try requirements like:
 
-- React 18 + TypeScript
-- Vite
-- Zustand (blackboard state)
-- Tailwind CSS
-- Designed for future WebGPU + Transformers.js local inference
+- `Build a todo list with create, toggle, and filter by status`
+- `Create a simple counter with increment, decrement, and reset`
+- `Implement email/password authentication with session validation`
+- `Build a calculator with add, subtract, multiply, and divide`
 
-## Project Structure
+The pipeline will:
+
+1. Normalize requirements
+2. Produce acceptance criteria
+3. Generate real TypeScript source + tests
+4. **Execute the tests in the browser sandbox**
+5. Run security / integration / regression checks
+6. Emit a release candidate when gates pass
+
+## Architecture
 
 ```
 src/
-  ├── types/          # Artifact schemas & stage definitions
-  ├── store/          # Blackboard (Zustand)
-  ├── agents/         # Stage agent implementations (mocked + extensible)
-  ├── components/     # UI: Pipeline, Blackboard, Artifact Viewer, etc.
-  ├── orchestrator/   # Pipeline runner & quality gates
-  └── App.tsx
+  agents/realAgents.ts   # Stage agents (artifact in → artifact out)
+  lib/
+    codeGenerator.ts     # Deterministic project generator
+    testRunner.ts        # In-browser expect-based test runner
+    virtualFs.ts         # Workspace filesystem
+  orchestrator/runner.ts # Pipeline + gates
+  store/blackboard.ts    # Zustand blackboard
+  components/            # UI
 ```
 
-## Status
+## Design notes
 
-This is a functional foundation implementing:
-
-- Full stage definitions matching the AgentMesh-X specification
-- Structured artifact model with epistemic labels
-- Blackboard architecture
-- Pipeline visualization and stage progression
-- Quality gates
-- Mock agents that produce realistic artifacts
-- Extensible design for real local/remote model backends
+- Agents never share conversation history — only artifacts.
+- Sandbox execution results are authoritative evidence.
+- Code generation is template-based (reproducible). Swap `codeGenerator.ts` / agent backends for LLM or Transformers.js later.
+- Quality gates can **block** the pipeline (e.g. failing tests, high severity security findings).
 
 ## License
 

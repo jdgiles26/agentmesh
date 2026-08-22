@@ -1,20 +1,28 @@
 import { STAGES } from '../types/stages';
 import type { StageId } from '../types/artifact';
 import { useBlackboard } from '../store/blackboard';
-import { runAgent } from '../agents/mockAgents';
+import { runRealAgent } from '../agents/realAgents';
+import { VirtualFS } from '../lib/virtualFs';
+
+const workspace = new VirtualFS();
+
+export function getWorkspace(): VirtualFS {
+  return workspace;
+}
 
 /**
- * Core orchestrator.
- * Enforces stage order, quality gates, and independent agent invocations.
- * In a full implementation each stage would spin up a fresh model instance.
+ * Core orchestrator — real pipeline.
+ * Each stage receives only prior artifacts + shared workspace.
+ * Quality gates can block progression.
  */
 export async function runPipeline() {
   const store = useBlackboard.getState();
   const { run } = store;
   if (!run || run.status !== 'running') return;
 
+  workspace.clear();
+
   for (const stage of STAGES) {
-    // Check if still running (user may have paused/stopped)
     const current = useBlackboard.getState().run;
     if (!current || current.status !== 'running') return;
 
@@ -24,30 +32,36 @@ export async function runPipeline() {
     const start = performance.now();
 
     try {
-      const artifacts = await runAgent(
+      const result = await runRealAgent(
         stage.id,
         run.requirement,
-        current.artifacts
+        current.artifacts,
+        workspace
       );
 
-      for (const art of artifacts) {
+      for (const art of result.artifacts) {
         store.addArtifact(art);
       }
 
-      const duration = Math.round(performance.now() - start);
-      store.setStageStatus(stage.id, 'completed', duration);
-
-      // Simple gate simulation
-      if (stage.gate) {
-        // In real system: evaluate gate conditions from artifacts
-        // For now we assume pass unless an artifact is blocked
-        const blocked = artifacts.some((a) => a.status === 'blocked');
-        if (blocked) {
-          store.setPipelineStatus('blocked');
-          store.addError(`Gate failed at ${stage.name}`);
-          return;
-        }
+      if (result.workspaceUpdates) {
+        store.setWorkspace(workspace.toArray());
+      } else {
+        // Keep workspace in sync even if no new files
+        store.setWorkspace(workspace.toArray());
       }
+
+      const duration = Math.round(performance.now() - start);
+
+      // Gate / blocked check
+      const blocked = result.artifacts.some((a) => a.status === 'blocked' || a.status === 'rejected');
+      if (blocked) {
+        store.setStageStatus(stage.id, 'blocked', duration);
+        store.setPipelineStatus('blocked');
+        store.addError(`Pipeline blocked at ${stage.name}`);
+        return;
+      }
+
+      store.setStageStatus(stage.id, 'completed', duration);
     } catch (err) {
       const duration = Math.round(performance.now() - start);
       store.setStageStatus(stage.id, 'failed', duration);
@@ -61,7 +75,9 @@ export async function runPipeline() {
   store.setPipelineStatus('completed');
 }
 
-export function getStageProgress(stageId: StageId): 'pending' | 'running' | 'completed' | 'failed' | 'blocked' {
+export function getStageProgress(
+  stageId: StageId
+): 'pending' | 'running' | 'completed' | 'failed' | 'blocked' {
   const { run } = useBlackboard.getState();
   if (!run) return 'pending';
   const entry = run.stage_history.find((h) => h.stage === stageId);
@@ -69,5 +85,6 @@ export function getStageProgress(stageId: StageId): 'pending' | 'running' | 'com
   if (entry.status === 'running') return 'running';
   if (entry.status === 'completed') return 'completed';
   if (entry.status === 'failed') return 'failed';
+  if (entry.status === 'blocked') return 'blocked';
   return 'pending';
 }

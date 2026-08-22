@@ -5,7 +5,7 @@ export function ArtifactInspector() {
 
   if (!run || !selectedArtifactId) {
     return (
-      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 text-center text-slate-500 text-sm h-full flex items-center justify-center">
+      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 text-center text-slate-500 text-sm h-full flex items-center justify-center min-h-[200px]">
         Select an artifact to inspect
       </div>
     );

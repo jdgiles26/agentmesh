@@ -1,7 +1,7 @@
 {
   "name": "agentmesh-x",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,9 @@
     "zustand": "^5.0.0",
     "clsx": "^2.1.1",
     "lucide-react": "^0.454.0",
-    "uuid": "^11.0.3"
+    "uuid": "^11.0.3",
+    "jszip": "^3.10.1",
+    "idb-keyval": "^6.2.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
