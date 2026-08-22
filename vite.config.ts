@@ -21,4 +21,17 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  build: {
+    target: 'esnext',
+    sourcemap: false,
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom'],
+          state: ['zustand'],
+        },
+      },
+    },
+  },
 })

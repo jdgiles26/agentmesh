@@ -1,6 +1,6 @@
 /**
- * WebGPU-first local inference engine using @huggingface/transformers.
- * Prefer WebGPU → WASM. Models cached in browser (Cache Storage / IndexedDB).
+ * WebGPU-first local inference engine.
+ * Optimized for latency: quantized dtypes, single-flight generate, browser cache.
  */
 
 import {
@@ -9,9 +9,10 @@ import {
   type TextGenerationPipeline,
 } from '@huggingface/transformers';
 
-// Configure transformers.js for browser
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+// Avoid spawning extra workers beyond what the browser handles well
+env.backends = env.backends ?? {};
 
 export type InferenceBackend = 'webgpu' | 'wasm' | 'unavailable';
 
@@ -34,7 +35,6 @@ export interface GenerateOptions {
   userPrompt: string;
 }
 
-// Small instruction models that fit in browser memory with WebGPU
 export const SUPPORTED_MODELS = [
   {
     id: 'onnx-community/Qwen2.5-0.5B-Instruct',
@@ -61,6 +61,7 @@ const DEFAULT_MODEL = SUPPORTED_MODELS[0].id;
 let generator: TextGenerationPipeline | null = null;
 let currentModelId = DEFAULT_MODEL;
 let currentBackend: InferenceBackend = 'unavailable';
+let generateLock: Promise<void> = Promise.resolve();
 
 const listeners = new Set<(s: ModelStatus) => void>();
 
@@ -76,7 +77,8 @@ let status: ModelStatus = {
 };
 
 function emit() {
-  listeners.forEach((fn) => fn({ ...status }));
+  const snap = { ...status };
+  listeners.forEach((fn) => fn(snap));
 }
 
 export function subscribeModelStatus(fn: (s: ModelStatus) => void): () => void {
@@ -91,15 +93,33 @@ export function getModelStatus(): ModelStatus {
 
 export async function detectWebGPU(): Promise<boolean> {
   try {
-    if (typeof navigator === 'undefined' || !(navigator as Navigator & { gpu?: unknown }).gpu) {
-      return false;
-    }
-    const gpu = (navigator as Navigator & { gpu: { requestAdapter: () => Promise<unknown> } }).gpu;
-    const adapter = await gpu.requestAdapter();
+    const nav = navigator as Navigator & {
+      gpu?: { requestAdapter: () => Promise<{ limits?: unknown } | null> };
+    };
+    if (!nav.gpu) return false;
+    const adapter = await nav.gpu.requestAdapter();
     return !!adapter;
   } catch {
     return false;
   }
+}
+
+async function tryLoad(
+  modelId: string,
+  device: 'webgpu' | 'wasm',
+  dtype: string
+): Promise<TextGenerationPipeline> {
+  return (await pipeline('text-generation', modelId, {
+    device,
+    dtype,
+    progress_callback: (p: { status?: string; progress?: number; file?: string }) => {
+      if (p.status === 'progress' && typeof p.progress === 'number') {
+        status.progress = Math.min(99, Math.round(p.progress));
+        status.statusText = `Downloading ${p.file || 'weights'}… ${status.progress}%`;
+        emit();
+      }
+    },
+  })) as TextGenerationPipeline;
 }
 
 export async function loadModel(modelId: string = DEFAULT_MODEL): Promise<void> {
@@ -119,71 +139,71 @@ export async function loadModel(modelId: string = DEFAULT_MODEL): Promise<void> 
 
   const webgpu = await detectWebGPU();
   status.webgpuAvailable = webgpu;
-  status.statusText = webgpu ? 'WebGPU available — loading model…' : 'WebGPU unavailable — loading WASM backend…';
   emit();
 
-  const device = webgpu ? 'webgpu' : 'wasm';
+  if (generator) {
+    try {
+      // @ts-expect-error optional dispose
+      await generator.dispose?.();
+    } catch {
+      /* ignore */
+    }
+    generator = null;
+  }
 
-  try {
-    // Dispose previous
-    if (generator) {
-      try {
-        // @ts-expect-error dispose may exist
-        await generator.dispose?.();
-      } catch {
-        /* ignore */
-      }
+  // Prefer quantized WebGPU for speed; fall back gracefully
+  const attempts: { device: 'webgpu' | 'wasm'; dtype: string; label: string }[] = webgpu
+    ? [
+        { device: 'webgpu', dtype: 'q4f16', label: 'WebGPU q4f16' },
+        { device: 'webgpu', dtype: 'fp16', label: 'WebGPU fp16' },
+        { device: 'wasm', dtype: 'q4', label: 'WASM q4' },
+      ]
+    : [{ device: 'wasm', dtype: 'q4', label: 'WASM q4' }];
+
+  let lastError: unknown = null;
+
+  for (const attempt of attempts) {
+    status.statusText = `Loading ${modelId} (${attempt.label})…`;
+    emit();
+    try {
+      generator = await tryLoad(modelId, attempt.device, attempt.dtype);
+      currentModelId = modelId;
+      currentBackend = attempt.device;
+      status = {
+        ...status,
+        loaded: true,
+        loading: false,
+        backend: attempt.device,
+        progress: 100,
+        statusText: `Ready (${attempt.label}) — ${modelId}`,
+        error: null,
+      };
+      emit();
+      return;
+    } catch (err) {
+      lastError = err;
       generator = null;
     }
-
-    generator = await pipeline('text-generation', modelId, {
-      device,
-      dtype: webgpu ? 'fp16' : 'q4',
-      progress_callback: (p: { status?: string; progress?: number; file?: string }) => {
-        if (p.status === 'progress' && typeof p.progress === 'number') {
-          status.progress = Math.round(p.progress);
-          status.statusText = `Downloading ${p.file || 'weights'}… ${status.progress}%`;
-          emit();
-        } else if (p.status === 'done') {
-          status.statusText = `Loaded ${p.file || ''}`;
-          emit();
-        }
-      },
-    }) as TextGenerationPipeline;
-
-    currentModelId = modelId;
-    currentBackend = device;
-    status = {
-      ...status,
-      loaded: true,
-      loading: false,
-      backend: device,
-      progress: 100,
-      statusText: `Ready (${device.toUpperCase()}) — ${modelId}`,
-      error: null,
-    };
-    emit();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    status = {
-      ...status,
-      loaded: false,
-      loading: false,
-      backend: 'unavailable',
-      progress: 0,
-      statusText: 'Load failed',
-      error: message,
-    };
-    generator = null;
-    emit();
-    throw err;
   }
+
+  const message = lastError instanceof Error ? lastError.message : String(lastError);
+  status = {
+    ...status,
+    loaded: false,
+    loading: false,
+    backend: 'unavailable',
+    progress: 0,
+    statusText: 'Load failed',
+    error: message,
+  };
+  emit();
+  throw lastError instanceof Error ? lastError : new Error(message);
 }
 
 export async function unloadModel(): Promise<void> {
   if (generator) {
     try {
-      // @ts-expect-error dispose may exist
+      // @ts-expect-error optional dispose
       await generator.dispose?.();
     } catch {
       /* ignore */
@@ -203,9 +223,22 @@ export async function unloadModel(): Promise<void> {
   emit();
 }
 
+function normalizeOutput(result: unknown): string {
+  const raw = Array.isArray(result) ? result[0] : result;
+  if (typeof raw === 'string') return raw.trim();
+  if (raw && typeof raw === 'object' && 'generated_text' in raw) {
+    const gt = (raw as { generated_text: unknown }).generated_text;
+    if (typeof gt === 'string') return gt.trim();
+    if (Array.isArray(gt)) {
+      const last = gt[gt.length - 1] as { content?: string } | string;
+      return (typeof last === 'string' ? last : last?.content || '').trim();
+    }
+  }
+  return '';
+}
+
 /**
- * Fresh inference call — no conversation history carried between stages.
- * Each agent invocation is independent.
+ * Serialized inference — avoids overlapping WebGPU work that tanks throughput.
  */
 export async function generate(options: GenerateOptions): Promise<string> {
   if (!generator || !status.loaded) {
@@ -215,42 +248,46 @@ export async function generate(options: GenerateOptions): Promise<string> {
   const {
     systemPrompt,
     userPrompt,
-    maxNewTokens = 1024,
-    temperature = 0.3,
+    maxNewTokens = 512,
+    temperature = 0.2,
     topP = 0.9,
   } = options;
 
-  // Chat-style messages for instruct models
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: userPrompt },
-  ];
+  // Clamp tokens for browser latency
+  const tokens = Math.min(Math.max(maxNewTokens, 64), 1536);
 
-  const result = await generator(messages, {
-    max_new_tokens: maxNewTokens,
-    temperature,
-    top_p: topP,
-    do_sample: temperature > 0,
-    return_full_text: false,
+  let output = '';
+  const run = async () => {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+
+    const result = await generator!(messages, {
+      max_new_tokens: tokens,
+      temperature,
+      top_p: topP,
+      do_sample: temperature > 0.05,
+      return_full_text: false,
+    });
+
+    output = normalizeOutput(result);
+  };
+
+  // Queue concurrent generate calls
+  const prev = generateLock;
+  let release!: () => void;
+  generateLock = new Promise<void>((r) => {
+    release = r;
   });
-
-  // Normalize output across pipeline versions
-  const raw = Array.isArray(result) ? result[0] : result;
-  let text = '';
-  if (raw && typeof raw === 'object') {
-    if ('generated_text' in raw) {
-      const gt = (raw as { generated_text: unknown }).generated_text;
-      if (typeof gt === 'string') text = gt;
-      else if (Array.isArray(gt)) {
-        // Some versions return message list
-        const last = gt[gt.length - 1] as { content?: string } | string;
-        text = typeof last === 'string' ? last : last?.content || '';
-      }
-    }
+  await prev;
+  try {
+    await run();
+  } finally {
+    release();
   }
-  if (!text && typeof raw === 'string') text = raw;
 
-  return text.trim();
+  return output;
 }
 
 export function isModelReady(): boolean {
