@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import type { Artifact, PipelineRun, StageId, PipelineStatus, VirtualFile } from '../types/artifact';
 import { STAGES } from '../types/stages';
+import { saveRun, clearSavedRun } from '../lib/persistence';
 
 interface BlackboardState {
   run: PipelineRun | null;
@@ -10,6 +11,7 @@ interface BlackboardState {
   selectedFilePath: string | null;
 
   startRun: (requirement: string) => void;
+  stopRun: () => void;
   setStageStatus: (stage: StageId, status: string, duration_ms?: number) => void;
   addArtifact: (artifact: Artifact) => void;
   setCurrentStage: (stage: StageId | null) => void;
@@ -19,6 +21,7 @@ interface BlackboardState {
   selectStage: (id: StageId | null) => void;
   selectFile: (path: string | null) => void;
   addError: (error: string) => void;
+  hydrate: (run: PipelineRun) => void;
   reset: () => void;
 }
 
@@ -35,6 +38,12 @@ const createEmptyRun = (requirement: string): PipelineRun => ({
   workspace: [],
 });
 
+function persist(run: PipelineRun | null) {
+  if (run && run.status !== 'running') {
+    void saveRun(run);
+  }
+}
+
 export const useBlackboard = create<BlackboardState>((set, get) => ({
   run: null,
   selectedArtifactId: null,
@@ -46,6 +55,15 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     run.status = 'running';
     run.started_at = new Date().toISOString();
     set({ run, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null });
+  },
+
+  stopRun: () => {
+    const { run } = get();
+    if (!run || run.status !== 'running') return;
+    const next = { ...run, status: 'blocked' as PipelineStatus, completed_at: new Date().toISOString() };
+    next.errors = [...next.errors, 'Stopped by user'];
+    set({ run: next });
+    persist(next);
   },
 
   setStageStatus: (stage, status, duration_ms) => {
@@ -77,7 +95,9 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     if (status === 'completed' || status === 'failed' || status === 'blocked') {
       updates.completed_at = new Date().toISOString();
     }
-    set({ run: { ...run, ...updates } });
+    const next = { ...run, ...updates };
+    set({ run: next });
+    persist(next);
   },
 
   setWorkspace: (files) => {
@@ -96,8 +116,12 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     set({ run: { ...run, errors: [...run.errors, error] } });
   },
 
-  reset: () =>
-    set({ run: null, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null }),
+  hydrate: (run) => set({ run, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null }),
+
+  reset: () => {
+    void clearSavedRun();
+    set({ run: null, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null });
+  },
 }));
 
 export function createArtifact(

@@ -1,6 +1,6 @@
 /**
  * WebGPU-first local inference engine.
- * Optimized for latency: quantized dtypes, single-flight generate, browser cache.
+ * Quantized dtypes, serialized generate queue, browser cache.
  */
 
 import {
@@ -11,8 +11,6 @@ import {
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
-// Avoid spawning extra workers beyond what the browser handles well
-env.backends = env.backends ?? {};
 
 export type InferenceBackend = 'webgpu' | 'wasm' | 'unavailable';
 
@@ -94,7 +92,7 @@ export function getModelStatus(): ModelStatus {
 export async function detectWebGPU(): Promise<boolean> {
   try {
     const nav = navigator as Navigator & {
-      gpu?: { requestAdapter: () => Promise<{ limits?: unknown } | null> };
+      gpu?: { requestAdapter: () => Promise<unknown> };
     };
     if (!nav.gpu) return false;
     const adapter = await nav.gpu.requestAdapter();
@@ -151,7 +149,6 @@ export async function loadModel(modelId: string = DEFAULT_MODEL): Promise<void> 
     generator = null;
   }
 
-  // Prefer quantized WebGPU for speed; fall back gracefully
   const attempts: { device: 'webgpu' | 'wasm'; dtype: string; label: string }[] = webgpu
     ? [
         { device: 'webgpu', dtype: 'q4f16', label: 'WebGPU q4f16' },
@@ -237,9 +234,6 @@ function normalizeOutput(result: unknown): string {
   return '';
 }
 
-/**
- * Serialized inference — avoids overlapping WebGPU work that tanks throughput.
- */
 export async function generate(options: GenerateOptions): Promise<string> {
   if (!generator || !status.loaded) {
     throw new Error('Model not loaded. Call loadModel() first.');
@@ -248,13 +242,13 @@ export async function generate(options: GenerateOptions): Promise<string> {
   const {
     systemPrompt,
     userPrompt,
-    maxNewTokens = 512,
+    maxNewTokens = 1024,
     temperature = 0.2,
     topP = 0.9,
   } = options;
 
-  // Clamp tokens for browser latency
-  const tokens = Math.min(Math.max(maxNewTokens, 64), 1536);
+  // Allow up to 2048 for generative stages
+  const tokens = Math.min(Math.max(maxNewTokens, 64), 2048);
 
   let output = '';
   const run = async () => {
@@ -274,7 +268,6 @@ export async function generate(options: GenerateOptions): Promise<string> {
     output = normalizeOutput(result);
   };
 
-  // Queue concurrent generate calls
   const prev = generateLock;
   let release!: () => void;
   generateLock = new Promise<void>((r) => {

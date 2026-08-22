@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Header } from './components/Header';
 import { ModelPanel } from './components/ModelPanel';
 import { RequirementInput } from './components/RequirementInput';
@@ -6,10 +7,20 @@ import { BlackboardPanel } from './components/BlackboardPanel';
 import { ArtifactInspector } from './components/ArtifactInspector';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { StatusBar } from './components/StatusBar';
+import { ProjectReportPanel } from './components/ProjectReportPanel';
 import { useBlackboard } from './store/blackboard';
+import { loadRun } from './lib/persistence';
 
 export default function App() {
-  const { run } = useBlackboard();
+  const { run, hydrate } = useBlackboard();
+
+  useEffect(() => {
+    void loadRun().then((saved) => {
+      if (saved && saved.status !== 'running') {
+        hydrate(saved);
+      }
+    });
+  }, [hydrate]);
 
   return (
     <div className="min-h-screen bg-[#0a0f1a] text-slate-100">
@@ -30,10 +41,12 @@ export default function App() {
               </div>
             </div>
             <WorkspacePanel />
+            <ProjectReportPanel />
           </>
         )}
         <footer className="text-center text-[11px] text-slate-600 pt-4 pb-8">
-          AgentMesh-X — WebGPU local inference · Independent agents · Artifact contracts · Deterministic sandbox · Autonomous debug loop
+          AgentMesh-X v1.2 — WebGPU local inference · Independent agents · Artifact contracts · Deterministic
+          sandbox · Project report
         </footer>
       </main>
     </div>

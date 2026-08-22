@@ -1,4 +1,5 @@
 import { useBlackboard } from '../store/blackboard';
+import { STAGES } from '../types/stages';
 import clsx from 'clsx';
 
 export function StatusBar() {
@@ -15,7 +16,8 @@ export function StatusBar() {
   };
 
   const completed = run.stage_history.filter((h) => h.status === 'completed').length;
-  const total = 22; // STAGES.length
+  const total = STAGES.filter((s) => s.id !== 'debugger').length;
+  const totalMs = run.stage_history.reduce((s, h) => s + (h.duration_ms || 0), 0);
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-xl px-4 py-3 flex flex-wrap items-center gap-4 text-xs">
@@ -25,13 +27,19 @@ export function StatusBar() {
       </div>
       <div>
         <span className="text-slate-500">Progress: </span>
-        <span className="text-slate-200">{completed} / {total} stages</span>
+        <span className="text-slate-200">
+          {completed} / {total} stages
+        </span>
+      </div>
+      <div>
+        <span className="text-slate-500">Time: </span>
+        <span className="text-slate-200">{(totalMs / 1000).toFixed(1)}s</span>
       </div>
       <div className="flex-1 min-w-[120px]">
         <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
           <div
             className="h-full bg-mesh-500 transition-all duration-500"
-            style={{ width: `${(completed / total) * 100}%` }}
+            style={{ width: `${Math.min(100, (completed / total) * 100)}%` }}
           />
         </div>
       </div>
