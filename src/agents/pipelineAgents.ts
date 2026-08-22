@@ -1,6 +1,6 @@
 /**
- * Stage handlers — deterministic tools preferred; LLM only when needed.
- * Optimized: sandbox/regression/static skip extra LLM summarization for speed.
+ * Stage handlers — deterministic tools preferred; LLM when needed.
+ * Guardrails on generated code; telemetry on tool boundaries.
  */
 
 import type { Artifact, StageId, VirtualFile } from '../types/artifact';
@@ -8,10 +8,14 @@ import { createArtifact } from '../store/blackboard';
 import { runIndependentAgent } from './agentRuntime';
 import { VirtualFS } from '../lib/virtualFs';
 import { runTests, toRunnableModule } from '../lib/testRunner';
+import { scanGeneratedCode } from '../lib/guardrails';
+import { logTelemetry } from '../lib/telemetry';
 
 export interface StageResult {
   artifacts: Artifact[];
   workspaceFiles?: VirtualFile[];
+  tokensInEst?: number;
+  tokensOutEst?: number;
 }
 
 function filesFromParsed(
@@ -46,10 +50,17 @@ async function llmStage(
   stageId: StageId,
   requirement: string,
   artifacts: Record<string, Artifact>,
+  runId: string,
   extraContext?: string
-): Promise<Artifact> {
-  const out = await runIndependentAgent({ stageId, requirement, artifacts, extraContext });
-  return out.artifact;
+): Promise<{ artifact: Artifact; tokensInEst: number; tokensOutEst: number }> {
+  const out = await runIndependentAgent({
+    stageId,
+    requirement,
+    artifacts,
+    extraContext,
+    runId,
+  });
+  return { artifact: out.artifact, tokensInEst: out.tokensInEst, tokensOutEst: out.tokensOutEst };
 }
 
 function runWorkspaceTests(workspace: VirtualFS) {
@@ -66,14 +77,20 @@ export async function executeStage(
   stageId: StageId,
   requirement: string,
   artifacts: Record<string, Artifact>,
-  workspace: VirtualFS
+  workspace: VirtualFS,
+  runId = 'unknown'
 ): Promise<StageResult> {
   switch (stageId) {
     case 'test_generation': {
-      const art = await llmStage(stageId, requirement, artifacts);
-      const tests = filesFromParsed(art.content, 'test_files');
+      const { artifact, tokensInEst, tokensOutEst } = await llmStage(
+        stageId,
+        requirement,
+        artifacts,
+        runId
+      );
+      const tests = filesFromParsed(artifact.content, 'test_files');
       if (tests.length) workspace.merge(tests);
-      return { artifacts: [art], workspaceFiles: workspace.toArray() };
+      return { artifacts: [artifact], workspaceFiles: workspace.toArray(), tokensInEst, tokensOutEst };
     }
 
     case 'code_generation': {
@@ -81,14 +98,33 @@ export async function executeStage(
         .getTestFiles()
         .map((f) => `--- ${f.path} ---\n${f.content}`)
         .join('\n\n');
-      const art = await llmStage(
+      const { artifact, tokensInEst, tokensOutEst } = await llmStage(
         stageId,
         requirement,
         artifacts,
+        runId,
         testCtx ? `Tests that must pass:\n${testCtx}` : undefined
       );
-      const sources = filesFromParsed(art.content, 'source_files');
-      if (sources.length) workspace.merge(sources);
+      const sources = filesFromParsed(artifact.content, 'source_files');
+
+      // Guardrail: scan generated source
+      for (const f of sources) {
+        const scan = scanGeneratedCode(f.content);
+        if (!scan.ok) {
+          logTelemetry({
+            run_id: runId,
+            stage_id: stageId,
+            level: 'warn',
+            event: 'code_guardrail_hit',
+            detail: { file: f.path, findings: scan.findings },
+          });
+          // Strip clearly dangerous files from merge
+          if (scan.findings.some((x) => /eval|innerHTML|PRIVATE KEY/i.test(x))) {
+            continue;
+          }
+        }
+        workspace.write(f.path, f.content, f.language);
+      }
 
       if (!workspace.exists('package.json')) {
         workspace.write(
@@ -101,22 +137,21 @@ export async function executeStage(
           'json'
         );
       }
-      return { artifacts: [art], workspaceFiles: workspace.toArray() };
+      return { artifacts: [artifact], workspaceFiles: workspace.toArray(), tokensInEst, tokensOutEst };
     }
 
     case 'static_analysis': {
-      // Fully deterministic — no LLM round-trip
       const files = workspace.toArray();
       const issues: { file: string; severity: string; message: string }[] = [];
       for (const f of files) {
-        if (/\beval\s*\(/.test(f.content))
-          issues.push({ file: f.path, severity: 'error', message: 'uses eval()' });
-        if (/new\s+Function\s*\(/.test(f.content) && !f.path.includes('test'))
-          issues.push({ file: f.path, severity: 'warning', message: 'uses Function constructor' });
-        if (/document\.write|innerHTML\s*=/.test(f.content))
-          issues.push({ file: f.path, severity: 'error', message: 'unsafe DOM sink' });
-        if (/api[_-]?key\s*[:=]\s*['"][^'"]+['"]/i.test(f.content))
-          issues.push({ file: f.path, severity: 'error', message: 'possible hardcoded secret' });
+        const scan = scanGeneratedCode(f.content);
+        for (const msg of scan.findings) {
+          issues.push({
+            file: f.path,
+            severity: /eval|innerHTML|PRIVATE KEY|secret/i.test(msg) ? 'error' : 'warning',
+            message: msg,
+          });
+        }
       }
       const hasError = issues.some((i) => i.severity === 'error');
       const art = createArtifact(
@@ -131,12 +166,19 @@ export async function executeStage(
         hasError ? 'blocked' : 'verified',
         0.95
       );
-      art.verification = ['Deterministic static scan'];
+      art.verification = ['Deterministic static scan + guardrails'];
+      logTelemetry({
+        run_id: runId,
+        stage_id: stageId,
+        level: hasError ? 'error' : 'info',
+        event: 'static_analysis',
+        status: art.status,
+        detail: { issue_count: issues.length },
+      });
       return { artifacts: [art] };
     }
 
     case 'sandbox_execution': {
-      // Deterministic only — authoritative evidence, no LLM
       const { testFiles, runnable } = runWorkspaceTests(workspace);
 
       if (testFiles.length === 0) {
@@ -188,6 +230,15 @@ export async function executeStage(
         exitCode === 0 ? 0.98 : 0.25
       );
       art.verification = ['Deterministic in-browser sandbox'];
+      logTelemetry({
+        run_id: runId,
+        stage_id: stageId,
+        level: exitCode === 0 ? 'info' : 'error',
+        event: 'sandbox_execution',
+        duration_ms: duration,
+        status: exitCode === 0 ? 'PASS' : 'FAIL',
+        detail: { passed, failed },
+      });
       return { artifacts: [art] };
     }
 
@@ -209,9 +260,9 @@ export async function executeStage(
         return { artifacts: [art] };
       }
 
-      // Compact failing context only
-      const failTests = ((exec?.content as { tests?: Array<{ passed: boolean; name: string; error?: string }> })
-        ?.tests || [])
+      const failTests = (
+        (exec?.content as { tests?: Array<{ passed: boolean; name: string; error?: string }> })?.tests || []
+      )
         .filter((t) => !t.passed)
         .slice(0, 8);
 
@@ -221,20 +272,30 @@ export async function executeStage(
         .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 2500)}`)
         .join('\n\n');
 
-      const art = await llmStage(
+      const { artifact, tokensInEst, tokensOutEst } = await llmStage(
         stageId,
         requirement,
         artifacts,
+        runId,
         `Failures:\n${JSON.stringify(failTests)}\n\nSource:\n${sourceCtx}`
       );
 
-      const patches = filesFromParsed(art.content, 'patches');
-      if (patches.length) workspace.merge(patches);
-      return { artifacts: [art], workspaceFiles: workspace.toArray() };
+      const patches = filesFromParsed(artifact.content, 'patches');
+      for (const p of patches) {
+        const scan = scanGeneratedCode(p.content);
+        if (scan.ok || !scan.findings.some((x) => /eval|PRIVATE KEY/i.test(x))) {
+          workspace.write(p.path, p.content, p.language);
+        }
+      }
+      return {
+        artifacts: [artifact],
+        workspaceFiles: workspace.toArray(),
+        tokensInEst,
+        tokensOutEst,
+      };
     }
 
     case 'regression': {
-      // Deterministic re-run only
       const { testFiles, runnable } = runWorkspaceTests(workspace);
       let exitCode = 0;
       const allTests = [];
@@ -262,7 +323,6 @@ export async function executeStage(
     }
 
     case 'integration': {
-      // Deterministic structure checks
       const files = workspace.toArray();
       const checks = {
         package_json: files.some((f) => f.path === 'package.json'),
@@ -308,11 +368,7 @@ export async function executeStage(
       const art = createArtifact(
         'accessibility',
         'Accessibility Engineer',
-        {
-          applicable: hasUi,
-          issues: [],
-          status: hasUi ? 'PASS' : 'N/A',
-        },
+        { applicable: hasUi, issues: [], status: hasUi ? 'PASS' : 'N/A' },
         [],
         'verified',
         0.9
@@ -321,18 +377,24 @@ export async function executeStage(
     }
 
     case 'documentation': {
-      const art = await llmStage(
+      const { artifact, tokensInEst, tokensOutEst } = await llmStage(
         stageId,
         requirement,
         artifacts,
+        runId,
         `Files:\n${workspace
           .toArray()
           .map((f) => f.path)
           .join('\n')}`
       );
-      const readme = typeof art.content.readme === 'string' ? art.content.readme : null;
+      const readme = typeof artifact.content.readme === 'string' ? artifact.content.readme : null;
       if (readme) workspace.write('README.md', readme, 'markdown');
-      return { artifacts: [art], workspaceFiles: workspace.toArray() };
+      return {
+        artifacts: [artifact],
+        workspaceFiles: workspace.toArray(),
+        tokensInEst,
+        tokensOutEst,
+      };
     }
 
     default: {
@@ -344,8 +406,14 @@ export async function executeStage(
             .map((f) => `--- ${f.path} ---\n${f.content.slice(0, 1500)}`)
             .join('\n\n')}`
         : undefined;
-      const art = await llmStage(stageId, requirement, artifacts, extra);
-      return { artifacts: [art] };
+      const { artifact, tokensInEst, tokensOutEst } = await llmStage(
+        stageId,
+        requirement,
+        artifacts,
+        runId,
+        extra
+      );
+      return { artifacts: [artifact], tokensInEst, tokensOutEst };
     }
   }
 }

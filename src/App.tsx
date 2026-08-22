@@ -8,6 +8,7 @@ import { ArtifactInspector } from './components/ArtifactInspector';
 import { WorkspacePanel } from './components/WorkspacePanel';
 import { StatusBar } from './components/StatusBar';
 import { ProjectReportPanel } from './components/ProjectReportPanel';
+import { TelemetryPanel } from './components/TelemetryPanel';
 import { useBlackboard } from './store/blackboard';
 import { loadRun } from './lib/persistence';
 
@@ -33,8 +34,9 @@ export default function App() {
         {run && (
           <>
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-              <div className="lg:col-span-2">
+              <div className="lg:col-span-2 space-y-4">
                 <BlackboardPanel />
+                <TelemetryPanel />
               </div>
               <div className="lg:col-span-3">
                 <ArtifactInspector />
@@ -45,8 +47,7 @@ export default function App() {
           </>
         )}
         <footer className="text-center text-[11px] text-slate-600 pt-4 pb-8">
-          AgentMesh-X v1.2 — WebGPU local inference · Independent agents · Artifact contracts · Deterministic
-          sandbox · Project report
+          AgentMesh-X — WebGPU agents · Artifact contracts · Telemetry · Budgets · Guardrails
         </footer>
       </main>
     </div>

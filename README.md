@@ -1,29 +1,26 @@
 # AgentMesh-X
 
-Browser-native cooperative multi-agent software engineering pipeline with **local WebGPU inference**.
+Browser-native cooperative multi-agent software engineering pipeline with **local WebGPU inference**, aligned with **ai-agentic-workflows** reliability patterns.
 
-## Final feature set
+## Agentic workflow controls
 
-- WebGPU-first models via `@huggingface/transformers` (WASM fallback)
-- **Higher token budgets** on generative stages (tests/code/debug up to 2048)
-- Independent agent invocations (no shared chat history)
-- Full stage pipeline with quality gates
-- Deterministic in-browser test sandbox
-- Bounded autonomous debug loop
-- Project report (PASS / FAIL / BLOCKED) from evidence
-- Workspace browser + ZIP export
-- IndexedDB persistence of last completed run
-- Stop control for in-flight pipelines
+| Pattern | Implementation |
+|--------|----------------|
+| Independent agents | Fresh model call per stage; no shared chat history |
+| Explicit artifacts | Versioned blackboard contracts |
+| Tool boundaries | Deterministic sandbox / static scan separated from LLM |
+| Observability | Structured telemetry events per stage/tool |
+| Cost control | Token estimates + stage/debug/wall-clock budgets |
+| Guardrails | Requirement sanitization, secret/unsafe-code scans |
+| Failure modes | Bounded debug loop, gate blocks, budget stops |
+| Human control | Stop button; local-only inference |
+| Persistence | IndexedDB last-run restore |
 
-## Token budgets (v1.2)
+## Token budgets (generative stages)
 
-| Stage class | max_new_tokens |
-|-------------|----------------|
-| Code / tests / debugger | 2048 |
-| Docs / acceptance / architecture | 1536 |
-| Intake / security / threat / adversarial | 1024 |
-| Critic / tasks / strategy | 768 |
-| Gate-style summaries | 256–512 |
+- Code / tests / debugger: **2048**
+- Docs / acceptance / architecture: **1536**
+- Intake / security / threat / adversarial: **1024**
 
 ## Quick start
 
@@ -32,24 +29,25 @@ npm install
 npm run dev
 ```
 
-1. Load a local model (Qwen2.5 0.5B recommended; WebGPU preferred)
-2. Enter a software requirement
+1. Load model (Qwen2.5 0.5B, WebGPU preferred)
+2. Enter requirement
 3. Start Autonomous Pipeline
-4. Inspect blackboard, workspace, and project report
+4. Monitor telemetry, blackboard, workspace, project report
 
-## Architecture
+## Project layout
 
 ```
 src/
-  lib/modelEngine.ts       # WebGPU/WASM inference
-  lib/testRunner.ts        # Sandbox tests
-  lib/projectReport.ts     # Final machine-readable report
-  lib/persistence.ts       # IndexedDB save/load
-  agents/stagePrompts.ts   # Versioned prompts + token budgets
-  agents/agentRuntime.ts   # Fresh independent calls
-  agents/pipelineAgents.ts # Stage handlers
-  orchestrator/runner.ts   # Gates + debug loop
+  agents/          # prompts, runtime, stage handlers
+  lib/             # model, sandbox, telemetry, budgets, guardrails
+  orchestrator/    # pipeline + gates
+  store/           # blackboard
+  components/      # monitoring UI
 ```
+
+## CI
+
+GitHub Actions: install + production build on `main` / PRs.
 
 ## License
 

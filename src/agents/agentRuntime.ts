@@ -1,5 +1,5 @@
 /**
- * Independent agent runtime with aggressive context pruning for latency.
+ * Independent agent runtime with context pruning, telemetry, and guardrails.
  */
 
 import { generate, isModelReady } from '../lib/modelEngine';
@@ -8,25 +8,29 @@ import { STAGE_PROMPTS, PROMPT_VERSION } from './stagePrompts';
 import type { StageId, Artifact } from '../types/artifact';
 import { createArtifact } from '../store/blackboard';
 import { STAGES } from '../types/stages';
+import { logTelemetry, estimateTokens } from '../lib/telemetry';
+import { validateArtifactShape } from '../lib/guardrails';
 
 export interface AgentInput {
   stageId: StageId;
   requirement: string;
   artifacts: Record<string, Artifact>;
   extraContext?: string;
+  runId?: string;
 }
 
 export interface AgentOutput {
   artifact: Artifact;
   rawModelText: string;
   parsed: Record<string, unknown>;
+  tokensInEst: number;
+  tokensOutEst: number;
 }
 
-const MAX_ARTIFACT_CHARS = 2400;
-const MAX_EXTRA_CHARS = 3500;
-const MAX_REQUIREMENT_CHARS = 800;
+const MAX_ARTIFACT_CHARS = 2800;
+const MAX_EXTRA_CHARS = 4000;
+const MAX_REQUIREMENT_CHARS = 1000;
 
-/** Stages whose content is most useful downstream */
 const HIGH_VALUE_STAGES = new Set([
   'intake',
   'requirements_critic',
@@ -50,7 +54,6 @@ function truncate(str: string, max: number): string {
 function compactContent(content: Record<string, unknown>): unknown {
   const json = JSON.stringify(content);
   if (json.length <= MAX_ARTIFACT_CHARS) return content;
-  // Prefer keeping summary-like fields
   const prefer = [
     'status',
     'decision',
@@ -82,16 +85,12 @@ function compactContent(content: Record<string, unknown>): unknown {
   return slim;
 }
 
-function selectRelevantArtifacts(
-  stageId: StageId,
-  artifacts: Record<string, Artifact>
-): Artifact[] {
+function selectRelevantArtifacts(stageId: StageId, artifacts: Record<string, Artifact>): Artifact[] {
   const stageDef = STAGES.find((s) => s.id === stageId);
   const all = Object.values(artifacts).sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  // Prefer required-input stages + high-value recent artifacts
   const requiredHints = new Set(
     (stageDef?.requiredInputs || []).map((r) => r.toLowerCase().replace(/_/g, ''))
   );
@@ -99,19 +98,12 @@ function selectRelevantArtifacts(
   const scored = all.map((a) => {
     let score = 0;
     if (HIGH_VALUE_STAGES.has(a.stage as StageId)) score += 2;
-    if (requiredHints.size && [...requiredHints].some((h) => a.stage.includes(h.slice(0, 6)))) {
-      score += 3;
-    }
-    // Always keep last execution / code related
-    if (['sandbox_execution', 'code_generation', 'test_generation', 'debugger'].includes(a.stage)) {
-      score += 2;
-    }
+    if (requiredHints.size && [...requiredHints].some((h) => a.stage.includes(h.slice(0, 6)))) score += 3;
+    if (['sandbox_execution', 'code_generation', 'test_generation', 'debugger'].includes(a.stage)) score += 2;
     return { a, score };
   });
 
-  scored.sort((x, y) => y.score - x.score || all.indexOf(y.a) - all.indexOf(x.a));
-
-  // Cap to last ~8 most relevant
+  scored.sort((x, y) => y.score - x.score);
   const picked = scored.slice(0, 8).map((s) => s.a);
   picked.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return picked;
@@ -160,8 +152,20 @@ export async function runIndependentAgent(input: AgentInput): Promise<AgentOutpu
   const config = STAGE_PROMPTS[input.stageId];
   if (!config) throw new Error(`No prompt configured for stage ${input.stageId}`);
 
+  const runId = input.runId || 'unknown';
   const userPrompt = buildUserPrompt(input);
   const systemPrompt = `${config.system}\nPrompt-v:${PROMPT_VERSION}\nJSON only. No markdown.`;
+  const tokensInEst = estimateTokens(systemPrompt) + estimateTokens(userPrompt);
+  const t0 = performance.now();
+
+  logTelemetry({
+    run_id: runId,
+    stage_id: input.stageId,
+    agent_id: `${input.stageId}-agent`,
+    level: 'info',
+    event: 'agent_start',
+    tokens_in_est: tokensInEst,
+  });
 
   const raw = await generate({
     systemPrompt,
@@ -174,19 +178,38 @@ export async function runIndependentAgent(input: AgentInput): Promise<AgentOutpu
   try {
     parsed = extractJSON(raw);
   } catch {
-    // Single cheap repair with tight budget
+    logTelemetry({
+      run_id: runId,
+      stage_id: input.stageId,
+      level: 'warn',
+      event: 'json_repair_attempt',
+    });
     const repairRaw = await generate({
       systemPrompt: 'Output ONLY valid JSON. No markdown fences.',
-      userPrompt: `Convert to JSON:\n${raw.slice(0, 2000)}`,
-      maxNewTokens: Math.min(config.maxTokens, 800),
+      userPrompt: `Convert to JSON:\n${raw.slice(0, 2500)}`,
+      maxNewTokens: Math.min(config.maxTokens, 1024),
       temperature: 0.05,
     });
     parsed = extractJSON(repairRaw);
   }
 
+  const shape = validateArtifactShape(parsed);
+  if (!shape.ok) {
+    logTelemetry({
+      run_id: runId,
+      stage_id: input.stageId,
+      level: 'error',
+      event: 'artifact_shape_invalid',
+      detail: { findings: shape.findings },
+    });
+    throw new Error(`Invalid artifact shape: ${shape.findings.join('; ')}`);
+  }
+
   const status = mapStatus(parsed);
   const assumptions = Array.isArray(parsed.assumptions) ? (parsed.assumptions as string[]).slice(0, 8) : [];
   const unknowns = Array.isArray(parsed.unknowns) ? (parsed.unknowns as string[]).slice(0, 8) : [];
+  const tokensOutEst = estimateTokens(raw);
+  const duration = Math.round(performance.now() - t0);
 
   const artifact = createArtifact(
     input.stageId,
@@ -201,5 +224,17 @@ export async function runIndependentAgent(input: AgentInput): Promise<AgentOutpu
   artifact.verification = ['Independent model invocation', `prompt_version=${PROMPT_VERSION}`];
   artifact.created_by = `${input.stageId}-agent`;
 
-  return { artifact, rawModelText: raw, parsed };
+  logTelemetry({
+    run_id: runId,
+    stage_id: input.stageId,
+    agent_id: artifact.created_by,
+    level: status === 'blocked' ? 'warn' : 'info',
+    event: 'agent_complete',
+    duration_ms: duration,
+    tokens_in_est: tokensInEst,
+    tokens_out_est: tokensOutEst,
+    status,
+  });
+
+  return { artifact, rawModelText: raw, parsed, tokensInEst, tokensOutEst };
 }
