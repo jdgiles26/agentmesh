@@ -1,10 +1,8 @@
 import type { TestResult, ExecutionReport } from '../types/artifact';
 
 /**
- * Minimal in-browser test runner.
- * Executes simple assertion-based tests safely via Function constructor
- * with a restricted assertion API. Not a full sandbox — suitable for
- * generated unit tests that only use the provided expect helpers.
+ * Restricted in-browser test runner.
+ * No access to DOM, fetch, or host filesystem.
  */
 export async function runTests(
   testCode: string,
@@ -27,45 +25,41 @@ export async function runTests(
       }
     },
     toBeTruthy() {
-      if (!actual) throw new Error(`Expected truthy value, got ${JSON.stringify(actual)}`);
+      if (!actual) throw new Error(`Expected truthy, got ${JSON.stringify(actual)}`);
     },
     toBeFalsy() {
-      if (actual) throw new Error(`Expected falsy value, got ${JSON.stringify(actual)}`);
+      if (actual) throw new Error(`Expected falsy, got ${JSON.stringify(actual)}`);
     },
     toContain(item: unknown) {
-      if (!Array.isArray(actual) && typeof actual !== 'string') {
-        throw new Error('toContain requires array or string');
+      if (typeof actual === 'string') {
+        if (!actual.includes(String(item))) {
+          throw new Error(`Expected string to contain ${JSON.stringify(item)}`);
+        }
+        return;
       }
-      if (!(actual as string | unknown[]).includes(item as never)) {
-        throw new Error(`Expected ${JSON.stringify(actual)} to contain ${JSON.stringify(item)}`);
+      if (Array.isArray(actual)) {
+        if (!actual.includes(item)) {
+          throw new Error(`Expected array to contain ${JSON.stringify(item)}`);
+        }
+        return;
       }
+      throw new Error('toContain requires array or string');
     },
   });
 
-  // Build a simple module registry from source
-  const modules: Record<string, unknown> = {};
+  const modules: Record<string, Record<string, unknown>> = {};
+
   for (const [name, code] of Object.entries(sourceModules)) {
     try {
-      // Extract exported functions via a constrained eval
-      const fn = new Function(
-        'exports',
-        `${code}\n; return exports;`
-      );
       const exports: Record<string, unknown> = {};
+      const fn = new Function('exports', `${code}\n;`);
       fn(exports);
       modules[name] = exports;
     } catch (e) {
-      stderr.push(`Module load error (${name}): ${String(e)}`);
+      stderr.push(`Module load error (${name}): ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  // Parse test cases: look for test("name", () => { ... }) or it("name", ...)
-  const testRegex = /(?:test|it)\s*\(\s*["'`]([^"'`]*)["'`]\s*,\s*(async\s*)?\(\)\s*=>\s*\{/g;
-  const tests: { name: string; body: string }[] = [];
-  let match: RegExpExecArray | null;
-  const source = testCode;
-
-  // Simpler approach: wrap entire test file and collect results via a custom test function
   try {
     const collected: { name: string; fn: () => void | Promise<void> }[] = [];
 
@@ -74,19 +68,15 @@ export async function runTests(
     };
 
     const require = (name: string) => {
+      const key = name.replace(/^\.\//, '').replace(/\.ts$/, '').replace(/\.js$/, '');
+      if (modules[key]) return modules[key];
       if (modules[name]) return modules[name];
+      // try basename
+      for (const k of Object.keys(modules)) {
+        if (k.endsWith('/' + key) || k === key) return modules[k];
+      }
       throw new Error(`Module not found: ${name}`);
     };
-
-    // Execute test file in restricted context
-    const runner = new Function(
-      'test',
-      'it',
-      'expect',
-      'require',
-      'console',
-      testCode + '\n;'
-    );
 
     const fakeConsole = {
       log: (...args: unknown[]) => stdout.push(args.map(String).join(' ')),
@@ -94,12 +84,13 @@ export async function runTests(
       warn: (...args: unknown[]) => stdout.push('[warn] ' + args.map(String).join(' ')),
     };
 
+    const runner = new Function('test', 'it', 'expect', 'require', 'console', testCode + '\n;');
     runner(testFn, testFn, expect, require, fakeConsole);
 
     for (const t of collected) {
       const tStart = performance.now();
       try {
-        await t.fn();
+        await Promise.resolve(t.fn());
         results.push({
           name: t.name,
           passed: true,
@@ -114,12 +105,21 @@ export async function runTests(
         });
       }
     }
+
+    if (collected.length === 0) {
+      results.push({
+        name: '(no tests collected)',
+        passed: false,
+        error: 'No test() or it() calls found in test file',
+        duration_ms: 0,
+      });
+    }
   } catch (e) {
-    stderr.push(`Test runner error: ${String(e)}`);
+    stderr.push(`Test runner error: ${e instanceof Error ? e.message : String(e)}`);
     results.push({
       name: '(suite load)',
       passed: false,
-      error: String(e),
+      error: e instanceof Error ? e.message : String(e),
       duration_ms: 0,
     });
   }
@@ -133,4 +133,40 @@ export async function runTests(
     stderr,
     duration_ms: Math.round(performance.now() - start),
   };
+}
+
+/** Convert TS/ESM source into exports-object form for the sandbox */
+export function toRunnableModule(source: string): string {
+  let code = source;
+
+  // Remove interface/type blocks
+  code = code.replace(/export\s+interface\s+\w+[^{]*\{[\s\S]*?\}/g, '');
+  code = code.replace(/export\s+type\s+\w+\s*=\s*[^;]+;/g, '');
+  code = code.replace(/interface\s+\w+[^{]*\{[\s\S]*?\}/g, '');
+
+  // Strip simple type annotations (naive but effective for generated code)
+  code = code.replace(/(\w)\s*:\s*[A-Za-z_][\w<>\[\]|\s,&?]*(?=\s*[=,)\{])/g, '$1');
+  code = code.replace(/\)\s*:\s*[A-Za-z_][\w<>\[\]|\s,&?]*(?=\s*[{])/g, ')');
+
+  // export function foo( -> exports.foo = function foo(
+  code = code.replace(/export\s+function\s+(\w+)\s*\(/g, 'exports.$1 = function $1(');
+
+  // export const foo = -> exports.foo =
+  code = code.replace(/export\s+const\s+(\w+)\s*=/g, 'exports.$1 =');
+
+  // export { a, b }
+  code = code.replace(/export\s*\{([^}]+)\}\s*;?/g, (_m, inner: string) => {
+    return inner
+      .split(',')
+      .map((part: string) => {
+        const name = part.trim().split(/\s+as\s+/).pop()!.trim();
+        return `exports.${name} = ${name};`;
+      })
+      .join('\n');
+  });
+
+  // export default
+  code = code.replace(/export\s+default\s+/g, 'exports.default = ');
+
+  return code;
 }

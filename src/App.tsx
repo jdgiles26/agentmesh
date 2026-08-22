@@ -1,4 +1,5 @@
 import { Header } from './components/Header';
+import { ModelPanel } from './components/ModelPanel';
 import { RequirementInput } from './components/RequirementInput';
 import { PipelineVisualizer } from './components/PipelineVisualizer';
 import { BlackboardPanel } from './components/BlackboardPanel';
@@ -14,6 +15,7 @@ export default function App() {
     <div className="min-h-screen bg-[#0a0f1a] text-slate-100">
       <Header />
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-5">
+        <ModelPanel />
         <RequirementInput />
         {run && <StatusBar />}
         <PipelineVisualizer />
@@ -31,7 +33,7 @@ export default function App() {
           </>
         )}
         <footer className="text-center text-[11px] text-slate-600 pt-4 pb-8">
-          AgentMesh-X — Real code generation · In-browser test execution · Artifact contracts · Evidence over consensus
+          AgentMesh-X — WebGPU local inference · Independent agents · Artifact contracts · Deterministic sandbox · Autonomous debug loop
         </footer>
       </main>
     </div>

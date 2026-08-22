@@ -9,7 +9,7 @@ export function WorkspacePanel() {
   if (!run || run.workspace.length === 0) {
     return (
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-sm text-slate-500">
-        Generated source files will appear here after the Code Generation stage.
+        Generated source appears here after code generation / test generation stages.
       </div>
     );
   }
@@ -18,14 +18,12 @@ export function WorkspacePanel() {
 
   const downloadZip = async () => {
     const zip = new JSZip();
-    for (const f of run.workspace) {
-      zip.file(f.path, f.content);
-    }
+    for (const f of run.workspace) zip.file(f.path, f.content);
     const blob = await zip.generateAsync({ type: 'blob' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `agentmesh-output-${run.run_id.slice(0, 8)}.zip`;
+    a.download = `agentmesh-${run.run_id.slice(0, 8)}.zip`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -37,10 +35,7 @@ export function WorkspacePanel() {
           <FileCode className="w-4 h-4" />
           Workspace ({run.workspace.length} files)
         </h2>
-        <button
-          onClick={downloadZip}
-          className="inline-flex items-center gap-1.5 text-xs text-mesh-400 hover:text-mesh-300"
-        >
+        <button onClick={downloadZip} className="inline-flex items-center gap-1.5 text-xs text-mesh-400 hover:text-mesh-300">
           <Download className="w-3.5 h-3.5" />
           Download ZIP
         </button>
@@ -53,9 +48,7 @@ export function WorkspacePanel() {
               onClick={() => selectFile(f.path)}
               className={clsx(
                 'w-full text-left px-3 py-1.5 text-xs truncate',
-                selected?.path === f.path
-                  ? 'bg-mesh-950/50 text-mesh-300'
-                  : 'text-slate-400 hover:bg-slate-800/50'
+                selected?.path === f.path ? 'bg-mesh-950/50 text-mesh-300' : 'text-slate-400 hover:bg-slate-800/50'
               )}
             >
               {f.path}

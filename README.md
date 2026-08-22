@@ -1,25 +1,17 @@
 # AgentMesh-X
 
-**Browser-Native Cooperative Multi-Agent AI Software Engineering Pipeline**
+Browser-native cooperative multi-agent software engineering pipeline with **real local WebGPU inference**.
 
-Real working implementation of the AgentMesh-X specification.
+## Capabilities
 
-## What actually works
-
-| Capability | Status |
-|---|---|
-| 22-stage pipeline with quality gates | ✅ |
-| Artifact blackboard (structured, versioned) | ✅ |
-| Independent stage isolation (no shared chat history) | ✅ |
-| Deterministic code generation (domain templates) | ✅ |
-| Virtual workspace + file browser | ✅ |
-| **In-browser unit test execution** | ✅ |
-| Static analysis (basic) | ✅ |
-| Security scan of generated code | ✅ |
-| Regression re-run of tests | ✅ |
-| Final review based on evidence only | ✅ |
-| Download generated project as ZIP | ✅ |
-| LLM / WebGPU local inference | 🔜 Pluggable (not bundled) |
+- **Local models** via `@huggingface/transformers` (WebGPU preferred, WASM fallback)
+- **Independent agents** — each stage is a fresh model invocation with no shared chat history
+- **Artifact blackboard** — structured, versioned contracts only
+- **Autonomous code generation** — model writes source + tests as JSON artifacts
+- **Deterministic sandbox** — unit tests actually execute in the browser
+- **Bounded debug loop** — on test failure, Debugger agent patches and sandbox re-runs (max 3 rounds)
+- **Quality gates** — blocked artifacts stop the pipeline
+- **Downloadable workspace** — ZIP export of generated project
 
 ## Quick start
 
@@ -28,44 +20,39 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173
+1. Open the app
+2. Click **Load Model** (Qwen2.5 0.5B recommended; requires ~1GB download, then cached)
+3. Prefer a browser with **WebGPU** (Chrome/Edge recent)
+4. Enter a software requirement
+5. Start the autonomous pipeline
 
-Try requirements like:
+## Model notes
 
-- `Build a todo list with create, toggle, and filter by status`
-- `Create a simple counter with increment, decrement, and reset`
-- `Implement email/password authentication with session validation`
-- `Build a calculator with add, subtract, multiply, and divide`
+| Model | Size | Notes |
+|-------|------|-------|
+| Qwen2.5 0.5B Instruct | ~1GB | Default, best quality/size for browser |
+| SmolLM2 360M | ~700MB | Faster, weaker |
+| Qwen2.5 1.5B | ~2GB | Higher quality if you have GPU memory |
 
-The pipeline will:
-
-1. Normalize requirements
-2. Produce acceptance criteria
-3. Generate real TypeScript source + tests
-4. **Execute the tests in the browser sandbox**
-5. Run security / integration / regression checks
-6. Emit a release candidate when gates pass
+Inference stays in-browser. Requirements and generated source are not sent to a remote API.
 
 ## Architecture
 
 ```
 src/
-  agents/realAgents.ts   # Stage agents (artifact in → artifact out)
-  lib/
-    codeGenerator.ts     # Deterministic project generator
-    testRunner.ts        # In-browser expect-based test runner
-    virtualFs.ts         # Workspace filesystem
-  orchestrator/runner.ts # Pipeline + gates
-  store/blackboard.ts    # Zustand blackboard
-  components/            # UI
+  lib/modelEngine.ts      # WebGPU/WASM load + generate
+  lib/testRunner.ts       # Restricted in-browser test runner
+  lib/virtualFs.ts        # Workspace
+  lib/jsonExtract.ts      # Robust JSON extraction from model output
+  agents/stagePrompts.ts  # Versioned system prompts per stage
+  agents/agentRuntime.ts  # Fresh independent invocations
+  agents/pipelineAgents.ts# Stage handlers (LLM + deterministic tools)
+  orchestrator/runner.ts  # Pipeline + gates + debug loop
 ```
 
-## Design notes
+## Honest limits
 
-- Agents never share conversation history — only artifacts.
-- Sandbox execution results are authoritative evidence.
-- Code generation is template-based (reproducible). Swap `codeGenerator.ts` / agent backends for LLM or Transformers.js later.
-- Quality gates can **block** the pipeline (e.g. failing tests, high severity security findings).
+Small browser models will not match frontier cloud LLMs. Complex multi-file applications may fail gates or need multiple debug rounds. The **process** (isolation, artifacts, evidence, gates) is fully implemented; generation quality scales with the loaded model.
 
 ## License
 

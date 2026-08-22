@@ -1,8 +1,9 @@
 import { STAGES } from '../types/stages';
 import type { StageId } from '../types/artifact';
 import { useBlackboard } from '../store/blackboard';
-import { runRealAgent } from '../agents/realAgents';
+import { executeStage } from '../agents/pipelineAgents';
 import { VirtualFS } from '../lib/virtualFs';
+import { isModelReady } from '../lib/modelEngine';
 
 const workspace = new VirtualFS();
 
@@ -10,19 +11,31 @@ export function getWorkspace(): VirtualFS {
   return workspace;
 }
 
+const MAX_DEBUG_ROUNDS = 3;
+
 /**
- * Core orchestrator — real pipeline.
- * Each stage receives only prior artifacts + shared workspace.
- * Quality gates can block progression.
+ * Full autonomous pipeline orchestrator.
+ * - Requires loaded WebGPU/WASM model
+ * - Each stage = fresh independent agent invocation
+ * - Deterministic sandbox for tests
+ * - Bounded debug loop on failure
  */
 export async function runPipeline() {
   const store = useBlackboard.getState();
   const { run } = store;
   if (!run || run.status !== 'running') return;
 
-  workspace.clear();
+  if (!isModelReady()) {
+    store.addError('Model not loaded. Load a local model (WebGPU preferred) before starting.');
+    store.setPipelineStatus('failed');
+    return;
+  }
 
-  for (const stage of STAGES) {
+  workspace.clear();
+  let debugRounds = 0;
+
+  for (let i = 0; i < STAGES.length; i++) {
+    const stage = STAGES[i];
     const current = useBlackboard.getState().run;
     if (!current || current.status !== 'running') return;
 
@@ -32,7 +45,7 @@ export async function runPipeline() {
     const start = performance.now();
 
     try {
-      const result = await runRealAgent(
+      const result = await executeStage(
         stage.id,
         run.requirement,
         current.artifacts,
@@ -42,18 +55,50 @@ export async function runPipeline() {
       for (const art of result.artifacts) {
         store.addArtifact(art);
       }
-
-      if (result.workspaceUpdates) {
-        store.setWorkspace(workspace.toArray());
-      } else {
-        // Keep workspace in sync even if no new files
-        store.setWorkspace(workspace.toArray());
-      }
+      store.setWorkspace(workspace.toArray());
 
       const duration = Math.round(performance.now() - start);
-
-      // Gate / blocked check
       const blocked = result.artifacts.some((a) => a.status === 'blocked' || a.status === 'rejected');
+
+      // Bounded autonomous debug loop
+      if (blocked && (stage.id === 'sandbox_execution' || stage.id === 'regression') && debugRounds < MAX_DEBUG_ROUNDS) {
+        store.setStageStatus(stage.id, 'completed', duration);
+
+        // Inject debugger stage dynamically
+        debugRounds++;
+        store.setCurrentStage('debugger');
+        store.setStageStatus('debugger', 'running');
+        const dbgStart = performance.now();
+        const latestArtifacts = useBlackboard.getState().run!.artifacts;
+        const dbgResult = await executeStage('debugger', run.requirement, latestArtifacts, workspace);
+        for (const art of dbgResult.artifacts) store.addArtifact(art);
+        store.setWorkspace(workspace.toArray());
+        store.setStageStatus('debugger', 'completed', Math.round(performance.now() - dbgStart));
+
+        // Re-run sandbox
+        store.setCurrentStage('sandbox_execution');
+        store.setStageStatus('sandbox_execution', 'running');
+        const reStart = performance.now();
+        const reResult = await executeStage('sandbox_execution', run.requirement, useBlackboard.getState().run!.artifacts, workspace);
+        for (const art of reResult.artifacts) store.addArtifact(art);
+        store.setWorkspace(workspace.toArray());
+        const reBlocked = reResult.artifacts.some((a) => a.status === 'blocked');
+        store.setStageStatus('sandbox_execution', reBlocked ? 'blocked' : 'completed', Math.round(performance.now() - reStart));
+
+        if (reBlocked && debugRounds >= MAX_DEBUG_ROUNDS) {
+          store.setPipelineStatus('blocked');
+          store.addError(`Pipeline blocked after ${MAX_DEBUG_ROUNDS} debug rounds at ${stage.name}`);
+          return;
+        }
+        if (reBlocked) {
+          // continue loop will retry logic only via debugRounds; fall through to block
+          store.setPipelineStatus('blocked');
+          store.addError(`Tests still failing after debug attempt ${debugRounds}`);
+          return;
+        }
+        continue;
+      }
+
       if (blocked) {
         store.setStageStatus(stage.id, 'blocked', duration);
         store.setPipelineStatus('blocked');
@@ -65,7 +110,7 @@ export async function runPipeline() {
     } catch (err) {
       const duration = Math.round(performance.now() - start);
       store.setStageStatus(stage.id, 'failed', duration);
-      store.addError(`Stage ${stage.name} failed: ${String(err)}`);
+      store.addError(`Stage ${stage.name}: ${err instanceof Error ? err.message : String(err)}`);
       store.setPipelineStatus('failed');
       return;
     }

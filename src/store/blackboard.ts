@@ -12,7 +12,6 @@ interface BlackboardState {
   startRun: (requirement: string) => void;
   setStageStatus: (stage: StageId, status: string, duration_ms?: number) => void;
   addArtifact: (artifact: Artifact) => void;
-  updateArtifact: (id: string, updates: Partial<Artifact>) => void;
   setCurrentStage: (stage: StageId | null) => void;
   setPipelineStatus: (status: PipelineStatus) => void;
   setWorkspace: (files: VirtualFile[]) => void;
@@ -42,7 +41,7 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
   selectedStageId: null,
   selectedFilePath: null,
 
-  startRun: (requirement: string) => {
+  startRun: (requirement) => {
     const run = createEmptyRun(requirement);
     run.status = 'running';
     run.started_at = new Date().toISOString();
@@ -53,38 +52,16 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
     const { run } = get();
     if (!run) return;
     const history = [...run.stage_history];
-    const existing = history.findIndex((h) => h.stage === stage);
-    if (existing >= 0) {
-      history[existing] = { stage, status, duration_ms };
-    } else {
-      history.push({ stage, status, duration_ms });
-    }
+    const idx = history.findIndex((h) => h.stage === stage);
+    if (idx >= 0) history[idx] = { stage, status, duration_ms };
+    else history.push({ stage, status, duration_ms });
     set({ run: { ...run, stage_history: history } });
   },
 
   addArtifact: (artifact) => {
     const { run } = get();
     if (!run) return;
-    set({
-      run: {
-        ...run,
-        artifacts: { ...run.artifacts, [artifact.artifact_id]: artifact },
-      },
-    });
-  },
-
-  updateArtifact: (id, updates) => {
-    const { run } = get();
-    if (!run || !run.artifacts[id]) return;
-    set({
-      run: {
-        ...run,
-        artifacts: {
-          ...run.artifacts,
-          [id]: { ...run.artifacts[id], ...updates },
-        },
-      },
-    });
+    set({ run: { ...run, artifacts: { ...run.artifacts, [artifact.artifact_id]: artifact } } });
   },
 
   setCurrentStage: (stage) => {
@@ -120,12 +97,7 @@ export const useBlackboard = create<BlackboardState>((set, get) => ({
   },
 
   reset: () =>
-    set({
-      run: null,
-      selectedArtifactId: null,
-      selectedStageId: null,
-      selectedFilePath: null,
-    }),
+    set({ run: null, selectedArtifactId: null, selectedStageId: null, selectedFilePath: null }),
 }));
 
 export function createArtifact(
